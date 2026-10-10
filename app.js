@@ -31,7 +31,7 @@ async function renderProjects(){
  if(project)select.value=project.id;
 }
 async function openProject(p){
- if(recorder)stopRecording();
+ if(recorder)throw Error('録音を終了してからプロジェクトを切り替えてください。');
  engine.stop(false);await saveNow();
  project=p;selectedTrack=p.tracks[0]?.id||null;selectedClip=null;page=0;cursor=0;
  try{localStorage.setItem('ai-daw-active-id',p.id);}catch{}
@@ -244,6 +244,7 @@ async function playPause(){
  }catch(err){$('play').textContent='▶';throw err;}
 }
 async function importJSON(text){
+ if(recorder)throw Error('録音を終了してからインポートしてください。');
  if(text.length>2*1024*1024)throw Error('JSONファイルは2MB以下にしてください。');
  let data;try{data=JSON.parse(text);}catch{throw Error('JSON構文が正しくありません。');}
  const p=D.normalize(data,{importing:true});await D.storage.save(p);
@@ -261,8 +262,9 @@ async function addAudioFile(file){
  try{
    await engine.ensureAudio({...project,tracks:[{...track,clips:[{id:D.uid(),assetId:id,start,length,offset:0}]}]});
    const buffer=engine.buffers.get(id);
-   if(buffer)length=Math.min(project.bars*4-start,buffer.duration*project.bpm/60);
- }catch(err){console.warn('Audio decode failed',err);}
+   if(!buffer)throw Error('音声ファイルをデコードできません。別形式の音声をお試しください。');
+   length=Math.min(project.bars*4-start,buffer.duration*project.bpm/60);
+ }catch(err){throw Error('音声ファイルを読み込めません: '+err.message);}
  track.clips.push({id:D.uid(),start,length,assetId:id,offset:0,notes:[]});
  project.tracks.push(track);selectedTrack=track.id;selectedClip={trackId:track.id,clipId:track.clips[0].id};
  saveSoon();renderAll();status('音声ファイルを追加しました');
@@ -281,6 +283,7 @@ async function recordVocal(){
    const types=['audio/webm;codecs=opus','audio/mp4','audio/webm','audio/ogg;codecs=opus'];
    const mime=types.find(t=>MediaRecorder.isTypeSupported(t));
    const r=new MediaRecorder(stream,mime?{mimeType:mime}:undefined);
+   const recordingProject=project,recordingBpm=project.bpm;
    recChunks=[];
    const start=Math.max(0,Math.min(project.bars*4-.25,cursor));
    await engine.start(project,start,beat=>updatePosition(beat),()=>{
@@ -296,14 +299,17 @@ async function recordVocal(){
      recChunks=[];for(const t of stream.getTracks())t.stop();recStream=null;
      if(!blob.size){status('録音データがありません。');return;}
      const assetId=D.uid();await D.storage.putAsset(assetId,blob);
-     const length=Math.min(project.bars*4-recStart,Math.max(.25,(seconds-preroll)*project.bpm/60));
-     const track=D.createTrack('audio','Vocal '+(project.tracks.filter(t=>t.instrument==='audio').length+1));
+     const length=Math.min(recordingProject.bars*4-recStart,Math.max(.25,(seconds-preroll)*recordingBpm/60));
+     const track=D.createTrack('audio','Vocal '+(recordingProject.tracks.filter(t=>t.instrument==='audio').length+1));
      const clip={id:D.uid(),start:recStart,length,assetId,offset:preroll,notes:[]};
-     track.clips.push(clip);project.tracks.push(track);
-     await engine.ensureAudio(project);
-     selectedTrack=track.id;selectedClip={trackId:track.id,clipId:clip.id};
-     await saveNow();await renderProjects();renderAll();
-     $('recordHint').textContent='録音済み · 再生して確認できます';
+     track.clips.push(clip);recordingProject.tracks.push(track);
+     await D.storage.save(recordingProject);
+     if(project===recordingProject){
+       await engine.ensureAudio(recordingProject);
+       selectedTrack=track.id;selectedClip={trackId:track.id,clipId:clip.id};
+       await renderProjects();renderAll();
+       $('recordHint').textContent='録音済み · 再生して確認できます';
+     }
      status('ボーカル保存完了: '+seconds.toFixed(1)+'秒');
    });
    r.onerror=()=>status('録音エラーが発生しました');
@@ -331,6 +337,7 @@ function finishRecording(){
  $('record').lastChild.textContent=' Record vocal';
  $('recordHint').textContent='保存しています…';
 }
+engine.onFailure=message=>{status(message);$('play').textContent='▶';};
 function setupEvents(){
  $('play').addEventListener('click',safe(playPause));
  $('stop').addEventListener('click',()=>{if(recorder)finishRecording();else engine.stop();$('play').textContent='▶';});
