@@ -5,7 +5,7 @@ const BAR_WIDTH=88,DRUMS=new Set(['kick','snare','clap','hat','perc']);
 let project=null,selectedTrack=null,selectedClip=null,page=0,octave=4,cursor=0,saveTimer=0;
 let recorder=null,recStream=null,recChunks=[],recStart=0,recStartedAt=0,recTicker=0,importedText='';
 const status=txt=>{$('status').textContent=txt;};
-const safe=fn=>(...args)=>Promise.resolve().then(()=>fn(...args)).catch(err=>{console.error(err);status(err.message||String(err));alert(err.message||String(err));});
+const safe=fn=>(...args)=>{try{Promise.resolve(fn(...args)).catch(err=>{console.error(err);status(err.message||String(err));alert(err.message||String(err));});}catch(err){console.error(err);status(err.message||String(err));alert(err.message||String(err));}};
 function node(tag,cls='',text){
  const e=document.createElement(tag);if(cls)e.className=cls;
  if(text!==undefined)e.textContent=String(text);return e;
@@ -43,7 +43,7 @@ function updatePosition(beat){
  $('position').textContent=String(bar).padStart(2,'0')+' : '+quarter;
  $('seek').value=String(cursor);
  const line=document.querySelector('.playhead');
- if(line)line.style.left=(180+cursor/4*BAR_WIDTH)+'px';
+ if(line)line.style.left=((document.querySelector('.ruler-label')?.offsetWidth||180)+cursor/4*BAR_WIDTH)+'px';
 }
 function renderHeader(){
  $('songName').value=project.name;$('bpm').value=project.bpm;$('bars').value=project.bars;
@@ -102,7 +102,7 @@ function renderTimeline(){
    row.append(trackLabel,lane);root.append(row);
  });
  if(!project.tracks.length)root.append(node('div','empty','＋ Trackから音源を追加できます'));
- const line=node('span','playhead');line.style.left=(180+cursor/4*BAR_WIDTH)+'px';root.append(line);
+ const line=node('span','playhead');line.style.left=((label.offsetWidth||180)+cursor/4*BAR_WIDTH)+'px';root.append(line);
  holder.scrollLeft=oldLeft;holder.scrollTop=oldTop;
 }
 function selected(){
@@ -236,6 +236,7 @@ function seekTo(beat){
 async function playPause(){
  if(recorder){status('録音中です。先に録音を終了してください。');return;}
  if(engine.playing){engine.stop();$('play').textContent='▶';return;}
+ if(cursor>=project.bars*4-.01){cursor=0;updatePosition(cursor);}
  try{
    $('play').textContent='…';
    await engine.start(project,cursor,beat=>updatePosition(beat),()=>{$('play').textContent='▶';});
@@ -269,6 +270,9 @@ async function addAudioFile(file){
 async function recordVocal(){
  if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder)
    throw Error('録音にはHTTPSとマイクに対応したブラウザが必要です。');
+ // Unlock Web Audio while this is still the direct user tap (important on iOS).
+ const ctx=engine.init();
+ if(ctx.state!=='running')await ctx.resume();
  const stream=await navigator.mediaDevices.getUserMedia({audio:{
    echoCancellation:true,noiseSuppression:false,autoGainControl:false
  }});
@@ -284,6 +288,7 @@ async function recordVocal(){
      if(recorder&&recorder.state!=='inactive')finishRecording();
    });
    recStart=start;recStartedAt=performance.now();recorder=r;
+   const preroll=Math.max(0,engine.anchorTime-engine.ctx.currentTime);
    r.ondataavailable=e=>{if(e.data&&e.data.size)recChunks.push(e.data);};
    r.onstop=safe(async()=>{
      const seconds=Math.max(.01,(performance.now()-recStartedAt)/1000);
@@ -291,9 +296,9 @@ async function recordVocal(){
      recChunks=[];for(const t of stream.getTracks())t.stop();recStream=null;
      if(!blob.size){status('録音データがありません。');return;}
      const assetId=D.uid();await D.storage.putAsset(assetId,blob);
-     const length=Math.min(project.bars*4-recStart,Math.max(.25,seconds*project.bpm/60));
+     const length=Math.min(project.bars*4-recStart,Math.max(.25,(seconds-preroll)*project.bpm/60));
      const track=D.createTrack('audio','Vocal '+(project.tracks.filter(t=>t.instrument==='audio').length+1));
-     const clip={id:D.uid(),start:recStart,length,assetId,offset:0,notes:[]};
+     const clip={id:D.uid(),start:recStart,length,assetId,offset:preroll,notes:[]};
      track.clips.push(clip);project.tracks.push(track);
      await engine.ensureAudio(project);
      selectedTrack=track.id;selectedClip={trackId:track.id,clipId:clip.id};
@@ -420,8 +425,10 @@ async function initialize(){
    status('端末の保存領域にアクセスできません: '+err.message);
    project=D.makeDemo();selectedTrack=project.tracks[0].id;renderAll();
  }
- if('serviceWorker' in navigator)
-   window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(console.warn));
+ if('serviceWorker' in navigator){
+   const register=()=>navigator.serviceWorker.register('./sw.js').catch(console.warn);
+   if(document.readyState==='complete')register();else window.addEventListener('load',register,{once:true});
+ }
 }
 initialize();
 })();
