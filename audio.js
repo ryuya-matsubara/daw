@@ -13,7 +13,7 @@ class DAWAudio {
  constructor(){
    this.ctx=null;this.master=null;this.buses=new Map();this.buffers=new Map();
    this.guitarCache=new Map();this.sources=new Set();this.events=[];
-   this.playing=false;this.timer=0;this.raf=0;this.cursor=0;this.nextIndex=0;
+   this.playing=false;this.timer=0;this.raf=0;this.clockTimer=0;this.onFailure=null;this.cursor=0;this.nextIndex=0;
    this.anchorBeat=0;this.anchorTime=0;this.project=null;this.onPosition=null;this.onStop=null;
    this.generation=0;
  }
@@ -110,7 +110,18 @@ class DAWAudio {
    const ctx=this.init();
    // This must be requested inside the actual Play user gesture on Safari.
    const resume=ctx.state!=='running'?ctx.resume():Promise.resolve();
-   await resume;
+   let timeout;
+   try {
+     await Promise.race([resume,new Promise((_,reject)=>{
+       timeout=setTimeout(()=>reject(Error('音声の再開がタイムアウトしました。もう一度Playを押してください。')),2000);
+     })]);
+   } catch(err) {
+     if(generation===this.generation){
+       try{ctx.close().catch(()=>{});}catch{}
+       this.ctx=null;
+     }
+     throw err;
+   } finally {clearTimeout(timeout);}
    if(generation!==this.generation)return;
    if(ctx.state!=='running')throw Error('音声を開始できません。もう一度Playを押してください。');
    await this.ensureAudio(project);
@@ -139,6 +150,17 @@ class DAWAudio {
      this.raf=requestAnimationFrame(draw);
    };
    this.raf=requestAnimationFrame(draw);
+   const startedClock=ctx.currentTime;
+   this.clockTimer=setTimeout(()=>{
+     this.clockTimer=0;
+     if(!this.playing||this.ctx!==ctx||generation!==this.generation)return;
+     if(ctx.currentTime-startedClock<.07){
+       this.stop(true);
+       try{ctx.close().catch(()=>{});}catch{}
+       this.ctx=null;
+       this.onFailure?.('音声が中断されました。もう一度Playを押してください。');
+     }
+   },1100);
  }
  schedule(){
    if(!this.playing)return;
@@ -171,7 +193,8 @@ class DAWAudio {
    ++this.generation;
    if(this.timer)clearInterval(this.timer);
    if(this.raf)cancelAnimationFrame(this.raf);
-   this.timer=0;this.raf=0;
+   if(this.clockTimer)clearTimeout(this.clockTimer);
+   this.timer=0;this.raf=0;this.clockTimer=0;
    for(const src of this.sources){try{src.stop();}catch{}}
    this.sources.clear();
    for(const bus of this.buses.values()){
