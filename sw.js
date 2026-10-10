@@ -1,5 +1,5 @@
-const CACHE='ai-daw-shell-v1';
-const ASSETS=['./','./index.html','./style.css','./data.js','./audio.js','./app.js','./manifest.webmanifest','./icon.svg','./AI_FORMAT.md'];
+const CACHE='ai-daw-shell-v2';
+const ASSETS=['./','./index.html','./style.css','./data.js','./audio.js','./app.js','./manifest.webmanifest','./icon.jpeg','./AI_FORMAT.md'];
 self.addEventListener('install',event=>{
  event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(ASSETS)));
  self.skipWaiting();
