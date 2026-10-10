@@ -249,3 +249,179 @@ async function importJSON(text){
  $('importDialog').close();$('jsonText').value='';importedText='';
  await openProject(p);status(p.tracks.length+'トラックをインポートしました');
 }
+async function addAudioFile(file){
+ if(!file||!file.size)return;
+ if(file.size>90*1024*1024)throw Error('音声ファイルは90MB以下にしてください。');
+ const id=D.uid();
+ await D.storage.putAsset(id,file);
+ const track=D.createTrack('audio',file.name.replace(/\.[^.]+$/,'').slice(0,30)||'Audio');
+ const start=Math.max(0,Math.floor(cursor/4)*4);
+ let length=Math.min(16,project.bars*4-start);
+ try{
+   await engine.ensureAudio({...project,tracks:[{...track,clips:[{id:D.uid(),assetId:id,start,length,offset:0}]}]});
+   const buffer=engine.buffers.get(id);
+   if(buffer)length=Math.min(project.bars*4-start,buffer.duration*project.bpm/60);
+ }catch(err){console.warn('Audio decode failed',err);}
+ track.clips.push({id:D.uid(),start,length,assetId:id,offset:0,notes:[]});
+ project.tracks.push(track);selectedTrack=track.id;selectedClip={trackId:track.id,clipId:track.clips[0].id};
+ saveSoon();renderAll();status('音声ファイルを追加しました');
+}
+async function recordVocal(){
+ if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder)
+   throw Error('録音にはHTTPSとマイクに対応したブラウザが必要です。');
+ const stream=await navigator.mediaDevices.getUserMedia({audio:{
+   echoCancellation:true,noiseSuppression:false,autoGainControl:false
+ }});
+ recStream=stream;
+ try{
+   const types=['audio/webm;codecs=opus','audio/mp4','audio/webm','audio/ogg;codecs=opus'];
+   const mime=types.find(t=>MediaRecorder.isTypeSupported(t));
+   const r=new MediaRecorder(stream,mime?{mimeType:mime}:undefined);
+   recChunks=[];
+   const start=Math.max(0,Math.min(project.bars*4-.25,cursor));
+   await engine.start(project,start,beat=>updatePosition(beat),()=>{
+     $('play').textContent='▶';
+     if(recorder&&recorder.state!=='inactive')finishRecording();
+   });
+   recStart=start;recStartedAt=performance.now();recorder=r;
+   r.ondataavailable=e=>{if(e.data&&e.data.size)recChunks.push(e.data);};
+   r.onstop=safe(async()=>{
+     const seconds=Math.max(.01,(performance.now()-recStartedAt)/1000);
+     const blob=new Blob(recChunks,{type:r.mimeType||recChunks[0]?.type||'audio/webm'});
+     recChunks=[];for(const t of stream.getTracks())t.stop();recStream=null;
+     if(!blob.size){status('録音データがありません。');return;}
+     const assetId=D.uid();await D.storage.putAsset(assetId,blob);
+     const length=Math.min(project.bars*4-recStart,Math.max(.25,seconds*project.bpm/60));
+     const track=D.createTrack('audio','Vocal '+(project.tracks.filter(t=>t.instrument==='audio').length+1));
+     const clip={id:D.uid(),start:recStart,length,assetId,offset:0,notes:[]};
+     track.clips.push(clip);project.tracks.push(track);
+     await engine.ensureAudio(project);
+     selectedTrack=track.id;selectedClip={trackId:track.id,clipId:clip.id};
+     await saveNow();await renderProjects();renderAll();
+     $('recordHint').textContent='録音済み · 再生して確認できます';
+     status('ボーカル保存完了: '+seconds.toFixed(1)+'秒');
+   });
+   r.onerror=()=>status('録音エラーが発生しました');
+   r.start(200);
+   $('play').textContent='Ⅱ';
+   $('record').classList.add('active');$('record').lastChild.textContent=' Stop recording';
+   $('recordHint').textContent='録音中 · 画面を閉じないでください';
+   recTicker=setInterval(()=>{
+     const sec=Math.floor((performance.now()-recStartedAt)/1000);
+     $('recordClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0');
+   },200);
+   status('Recording vocal');
+ }catch(err){
+   for(const t of stream.getTracks())t.stop();
+   recStream=null;recorder=null;engine.stop(false);throw err;
+ }
+}
+function finishRecording(){
+ if(!recorder)return;
+ const r=recorder;recorder=null;
+ if(r.state!=='inactive')r.stop();
+ if(recStream)for(const t of recStream.getTracks())t.stop();
+ clearInterval(recTicker);recTicker=0;engine.stop(false);
+ $('play').textContent='▶';$('record').classList.remove('active');
+ $('record').lastChild.textContent=' Record vocal';
+ $('recordHint').textContent='保存しています…';
+}
+function setupEvents(){
+ $('play').addEventListener('click',safe(playPause));
+ $('stop').addEventListener('click',()=>{if(recorder)finishRecording();else engine.stop();$('play').textContent='▶';});
+ $('seek').addEventListener('input',()=>updatePosition(number($('seek').value)));
+ $('seek').addEventListener('change',()=>seekTo(number($('seek').value)));
+ $('songName').addEventListener('change',()=>{project.name=$('songName').value.trim().slice(0,60)||'Untitled Project';saveSoon();renderProjects();});
+ $('bpm').addEventListener('change',()=>{
+   project.bpm=integer($('bpm').value,40,220);
+   if(engine.playing)engine.stop();saveSoon();renderHeader();
+ });
+ $('bars').addEventListener('change',()=>{
+   const value=integer($('bars').value,1,128);
+   if(project.tracks.some(t=>t.clips.some(c=>c.start+c.length>value*4))){
+     $('bars').value=project.bars;status('末尾を超えるクリップがあるため短縮できません。');return;
+   }
+   project.bars=value;cursor=Math.min(cursor,value*4);
+   if(engine.playing)engine.stop();saveSoon();renderAll();
+ });
+ $('projects').addEventListener('change',safe(async()=>{
+   const p=await D.storage.get($('projects').value);if(p)await openProject(D.normalize(p));
+ }));
+ $('newProject').addEventListener('click',safe(async()=>{
+   if(!confirm('新しい空のプロジェクトを作成しますか？'))return;
+   const p=D.emptyProject();await D.storage.save(p);await openProject(p);
+ }));
+ $('importBtn').addEventListener('click',()=>{$('importError').textContent='';$('importDialog').showModal();});
+ $('closeImport').addEventListener('click',()=>$('importDialog').close());
+ $('jsonFile').addEventListener('change',safe(async()=>{
+   const file=$('jsonFile').files?.[0];if(!file)return;
+   if(file.size>2*1024*1024)throw Error('JSONファイルは2MB以下にしてください。');
+   importedText=await file.text();$('jsonText').value=importedText;
+ }));
+ $('applyImport').addEventListener('click',async()=>{
+   try{$('importError').textContent='';await importJSON($('jsonText').value||importedText);}
+   catch(err){$('importError').textContent=err.message;}
+ });
+ $('demoBtn').addEventListener('click',safe(async()=>{
+   const p=D.makeDemo();await D.storage.save(p);$('importDialog').close();await openProject(p);
+ }));
+ $('addTrack').addEventListener('click',()=>{
+   const sel=$('addInstrument');sel.replaceChildren();
+   for(const [id,name] of D.INSTRUMENTS.filter(item=>item[0]!=='audio')){
+     const option=node('option','',name);option.value=id;sel.append(option);
+   }
+   $('addName').value='';$('addDialog').showModal();
+ });
+ $('closeAdd').addEventListener('click',()=>$('addDialog').close());
+ $('createTrack').addEventListener('click',()=>{
+   if(project.tracks.length>=32){status('最大32トラックです。');return;}
+   const t=D.createTrack($('addInstrument').value,$('addName').value||undefined);
+   project.tracks.push(t);selectedTrack=t.id;selectedClip=null;
+   $('addDialog').close();saveSoon();renderAll();
+ });
+ $('addClip').addEventListener('click',()=>{
+   const t=project.tracks.find(x=>x.id===selectedTrack)||project.tracks.find(x=>x.instrument!=='audio');
+   if(!t||t.instrument==='audio'){status('楽器トラックを選択してください。');return;}
+   const start=Math.min((project.bars-1)*4,Math.floor(cursor/4)*4);
+   const clip={id:D.uid(),start,length:Math.min(16,project.bars*4-start),notes:[]};
+   t.clips.push(clip);selectedTrack=t.id;selectedClip={trackId:t.id,clipId:clip.id};
+   page=0;octave=DRUMS.has(t.instrument)?2:t.instrument==='bass'||t.instrument==='808'?2:4;
+   saveSoon();renderAll();
+ });
+ $('addAudio').addEventListener('click',()=>$('audioFile').click());
+ $('audioFile').addEventListener('change',safe(async()=>{
+   await addAudioFile($('audioFile').files?.[0]);$('audioFile').value='';
+ }));
+ $('deleteClip').addEventListener('click',()=>{
+   const r=selected();if(!r||!confirm('このクリップを削除しますか？'))return;
+   r.track.clips=r.track.clips.filter(x=>x.id!==r.clip.id);
+   selectedClip=null;saveSoon();renderAll();
+ });
+ $('record').addEventListener('click',safe(async()=>{if(recorder)finishRecording();else await recordVocal();}));
+ document.addEventListener('visibilitychange',()=>{
+   if(document.hidden){
+     if(recorder)finishRecording();
+     else if(engine.playing){engine.stop();$('play').textContent='▶';}
+   }
+ });
+}
+async function initialize(){
+ setupEvents();
+ try{
+   const list=await D.storage.list();
+   let last=null;try{last=localStorage.getItem('ai-daw-active-id');}catch{}
+   let p=list.find(x=>x.id===last)||list.sort((a,b)=>b.updatedAt-a.updatedAt)[0];
+   if(!p){p=D.makeDemo();await D.storage.save(p);}
+   project=D.normalize(p);selectedTrack=project.tracks[0]?.id||null;
+   await renderProjects();renderAll();await engine.ensureAudio(project);
+   status('準備完了 · AI JSONのインポートまたはボーカル録音ができます');
+ }catch(err){
+   console.error(err);
+   status('端末の保存領域にアクセスできません: '+err.message);
+   project=D.makeDemo();selectedTrack=project.tracks[0].id;renderAll();
+ }
+ if('serviceWorker' in navigator)
+   window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(console.warn));
+}
+initialize();
+})();
